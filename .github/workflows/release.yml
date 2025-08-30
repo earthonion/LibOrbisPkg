@@ -16,7 +16,25 @@ concurrency:
 env:
   DOTNET_NOLOGO: true
   CONFIGURATION: Release
-  VERSION: ${{ github.ref_name }}   # "v0.3.0" on tags, branch name otherwise
+  # DO NOT set VERSION globally to avoid NuGet using an invalid value during restore
+
+# Reusable step snippet (copy into each job before any dotnet command):
+# - name: Compute versions
+#   id: ver
+#   shell: bash
+#   run: |
+#     if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+#       DISPLAY="${GITHUB_REF_NAME}"           # e.g., v0.3.0
+#       SEMVER="${GITHUB_REF_NAME#v}"          # e.g., 0.3.0
+#     else
+#       BR="${GITHUB_REF_NAME//[^0-9A-Za-z.-]/.}"
+#       DISPLAY="${BR}"                        # e.g., master
+#       SEMVER="0.0.0-${BR}.${GITHUB_RUN_NUMBER}"  # e.g., 0.0.0-master.1234
+#     fi
+#     echo "VERSION_DISPLAY=$DISPLAY" >> "$GITHUB_ENV"
+#     echo "VERSION_SEMVER=$SEMVER"  >> "$GITHUB_ENV"
+#     # Ensure any inherited VERSION is cleared so NuGet/MSBuild won't choke:
+#     echo "VERSION="                 >> "$GITHUB_ENV"
 
 jobs:
   # --- Cross-platform build & tests on every edit (Core only; avoids WinForms) ---
@@ -30,6 +48,22 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Compute versions
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            DISPLAY="${GITHUB_REF_NAME}"
+            SEMVER="${GITHUB_REF_NAME#v}"
+          else
+            BR="${GITHUB_REF_NAME//[^0-9A-Za-z.-]/.}"
+            DISPLAY="${BR}"
+            SEMVER="0.0.0-${BR}.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "VERSION_DISPLAY=$DISPLAY" >> "$GITHUB_ENV"
+          echo "VERSION_SEMVER=$SEMVER"  >> "$GITHUB_ENV"
+          echo "VERSION="                 >> "$GITHUB_ENV"
 
       - uses: actions/setup-dotnet@v4
         with:
@@ -48,7 +82,7 @@ jobs:
         run: dotnet restore "LibOrbisPkg.Core.sln"
 
       - name: Build (Core solution)
-        run: dotnet build "LibOrbisPkg.Core.sln" -c ${{ env.CONFIGURATION }} --no-restore
+        run: dotnet build "LibOrbisPkg.Core.sln" -c ${{ env.CONFIGURATION }} --no-restore -p:Version=${{ env.VERSION_SEMVER }}
 
       - name: Test (Core tests)
         run: dotnet test "LibOrbisPkgTests/LibOrbisPkgTests.csproj" -c ${{ env.CONFIGURATION }} --no-build --verbosity normal
@@ -62,6 +96,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Compute versions
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            DISPLAY="${GITHUB_REF_NAME}"
+            SEMVER="${GITHUB_REF_NAME#v}"
+          else
+            BR="${GITHUB_REF_NAME//[^0-9A-Za-z.-]/.}"
+            DISPLAY="${BR}"
+            SEMVER="0.0.0-${BR}.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "VERSION_DISPLAY=$DISPLAY" >> "$GITHUB_ENV"
+          echo "VERSION_SEMVER=$SEMVER"  >> "$GITHUB_ENV"
+          echo "VERSION="                 >> "$GITHUB_ENV"
+
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
@@ -71,7 +121,7 @@ jobs:
         run: dotnet restore "LibOrbisPkg.Core/LibOrbisPkg.Core.csproj"
 
       - name: Build Core
-        run: dotnet build "LibOrbisPkg.Core/LibOrbisPkg.Core.csproj" -c ${{ env.CONFIGURATION }} --no-restore
+        run: dotnet build "LibOrbisPkg.Core/LibOrbisPkg.Core.csproj" -c ${{ env.CONFIGURATION }} --no-restore -p:Version=${{ env.VERSION_SEMVER }}
 
       - name: Stage Core files
         run: |
@@ -83,13 +133,13 @@ jobs:
       - name: Zip Core
         run: |
           cd out/core
-          zip -r ../LibOrbisPkg.Core-${{ env.VERSION }}-net8.0.zip net8.0
+          zip -r ../LibOrbisPkg.Core-${{ env.VERSION_DISPLAY }}-net8.0.zip net8.0
 
       - name: Upload Core zip
         uses: actions/upload-artifact@v4
         with:
-          name: LibOrbisPkg.Core-${{ env.VERSION }}-net8.0.zip
-          path: out/LibOrbisPkg.Core-${{ env.VERSION }}-net8.0.zip
+          name: LibOrbisPkg.Core-${{ env.VERSION_DISPLAY }}-net8.0.zip
+          path: out/LibOrbisPkg.Core-${{ env.VERSION_DISPLAY }}-net8.0.zip
 
   # --- Package PkgTool for each RID (every edit) ---
   pkgtool:
@@ -117,6 +167,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Compute versions
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            DISPLAY="${GITHUB_REF_NAME}"
+            SEMVER="${GITHUB_REF_NAME#v}"
+          else
+            BR="${GITHUB_REF_NAME//[^0-9A-Za-z.-]/.}"
+            DISPLAY="${BR}"
+            SEMVER="0.0.0-${BR}.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "VERSION_DISPLAY=$DISPLAY" >> "$GITHUB_ENV"
+          echo "VERSION_SEMVER=$SEMVER"  >> "$GITHUB_ENV"
+          echo "VERSION="                 >> "$GITHUB_ENV"
+
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
@@ -129,7 +195,6 @@ jobs:
             **/NuGet.config
             **/global.json
 
-      # Restore only the CLI project to avoid pulling PkgEditor on non-Windows
       - name: Restore (PkgTool.Core)
         run: dotnet restore "PkgTool.Core/PkgTool.Core.csproj"
 
@@ -139,24 +204,25 @@ jobs:
             -c ${{ env.CONFIGURATION }} \
             -r ${{ matrix.rid }} \
             --no-self-contained \
+            -p:Version=${{ env.VERSION_SEMVER }} \
             -o out/pkgtool/${{ matrix.rid }}
 
       - name: Zip (Unix)
         if: runner.os != 'Windows'
         run: |
           cd out/pkgtool/${{ matrix.rid }}
-          zip -r "../../../PkgTool-${{ env.VERSION }}-${{ matrix.rid }}.zip" .
+          zip -r "../../../PkgTool-${{ env.VERSION_DISPLAY }}-${{ matrix.rid }}.zip" .
 
       - name: Zip (Windows)
         if: runner.os == 'Windows'
         run: |
-          powershell -NoProfile -Command "Compress-Archive -Path out/pkgtool/${{ matrix.rid }}/* -DestinationPath out/PkgTool-${{ env.VERSION }}-${{ matrix.rid }}.zip"
+          powershell -NoProfile -Command "Compress-Archive -Path out/pkgtool/${{ matrix.rid }}/* -DestinationPath out/PkgTool-${{ env.VERSION_DISPLAY }}-${{ matrix.rid }}.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PkgTool-${{ env.VERSION }}-${{ matrix.rid }}.zip
-          path: out/PkgTool-${{ env.VERSION }}-${{ matrix.rid }}.zip
+          name: PkgTool-${{ env.VERSION_DISPLAY }}-${{ matrix.rid }}.zip
+          path: out/PkgTool-${{ env.VERSION_DISPLAY }}-${{ matrix.rid }}.zip
 
   # --- Windows-only build for the GUI (PkgEditor) on every edit ---
   pkgeditor:
@@ -166,6 +232,22 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Compute versions
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            DISPLAY="${GITHUB_REF_NAME}"
+            SEMVER="${GITHUB_REF_NAME#v}"
+          else
+            BR="${GITHUB_REF_NAME//[^0-9A-Za-z.-]/.}"
+            DISPLAY="${BR}"
+            SEMVER="0.0.0-${BR}.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "VERSION_DISPLAY=$DISPLAY" >> "$GITHUB_ENV"
+          echo "VERSION_SEMVER=$SEMVER"  >> "$GITHUB_ENV"
+          echo "VERSION="                 >> "$GITHUB_ENV"
 
       - uses: actions/setup-dotnet@v4
         with:
@@ -183,19 +265,19 @@ jobs:
         run: dotnet restore "LibOrbisPkg.sln"
 
       - name: Build GUI (Windows only)
-        run: dotnet build "LibOrbisPkg.sln" -c ${{ env.CONFIGURATION }} --no-restore
+        run: dotnet build "LibOrbisPkg.sln" -c ${{ env.CONFIGURATION }} --no-restore -p:Version=${{ env.VERSION_SEMVER }}
 
       - name: Publish PkgEditor (win-x64)
-        run: dotnet publish "PkgEditor/PkgEditor.csproj" -c ${{ env.CONFIGURATION }} -r win-x64 --no-self-contained -o out/pkgeditor/win-x64
+        run: dotnet publish "PkgEditor/PkgEditor.csproj" -c ${{ env.CONFIGURATION }} -r win-x64 --no-self-contained -p:Version=${{ env.VERSION_SEMVER }} -o out/pkgeditor/win-x64
 
       - name: Zip GUI
-        run: powershell -NoProfile -Command "Compress-Archive -Path out/pkgeditor/win-x64/* -DestinationPath out/PkgEditor-${{ env.VERSION }}-windows-x64.zip"
+        run: powershell -NoProfile -Command "Compress-Archive -Path out/pkgeditor/win-x64/* -DestinationPath out/PkgEditor-${{ env.VERSION_DISPLAY }}-windows-x64.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PkgEditor-${{ env.VERSION }}-windows-x64.zip
-          path: out/PkgEditor-${{ env.VERSION }}-windows-x64.zip
+          name: PkgEditor-${{ env.VERSION_DISPLAY }}-windows-x64.zip
+          path: out/PkgEditor-${{ env.VERSION_DISPLAY }}-windows-x64.zip
 
   # --- Optional: pack NuGets on every edit (attached to Release only on tag) ---
   nuget:
@@ -206,28 +288,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
-          cache: true
-
-      # Compute a valid SemVer for NuGet:
-      # - on tags like v0.3.0  -> 0.3.0
-      # - on branches (e.g., master) -> 0.0.0-master.<run>
-      - name: Compute package version
+      - name: Compute versions
         id: ver
         shell: bash
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            # Trim leading v
-            PKG_VERSION="${GITHUB_REF_NAME#v}"
+            DISPLAY="${GITHUB_REF_NAME}"
+            SEMVER="${GITHUB_REF_NAME#v}"
           else
-            # Sanitize branch name to allowed chars for prerelease label
             BR="${GITHUB_REF_NAME//[^0-9A-Za-z.-]/.}"
-            PKG_VERSION="0.0.0-${BR}.${GITHUB_RUN_NUMBER}"
+            DISPLAY="${BR}"
+            SEMVER="0.0.0-${BR}.${GITHUB_RUN_NUMBER}"
           fi
-          echo "PKG_VERSION=$PKG_VERSION" >> "$GITHUB_ENV"
-          echo "pkg_version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
+          echo "VERSION_DISPLAY=$DISPLAY" >> "$GITHUB_ENV"
+          echo "VERSION_SEMVER=$SEMVER"  >> "$GITHUB_ENV"
+          echo "VERSION="                 >> "$GITHUB_ENV"
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+          cache: true
 
       - name: Restore
         run: dotnet restore "LibOrbisPkg.sln"
@@ -235,13 +315,13 @@ jobs:
       - name: Pack
         run: |
           mkdir -p nupkgs
-          dotnet pack "LibOrbisPkg/LibOrbisPkg.csproj" -c ${{ env.CONFIGURATION }} -p:PackageVersion=${{ env.PKG_VERSION }} -o ./nupkgs
-          dotnet pack "LibOrbisPkg.Core/LibOrbisPkg.Core.csproj" -c ${{ env.CONFIGURATION }} -p:PackageVersion=${{ env.PKG_VERSION }} -o ./nupkgs
+          dotnet pack "LibOrbisPkg/LibOrbisPkg.csproj"     -c ${{ env.CONFIGURATION }} -p:PackageVersion=${{ env.VERSION_SEMVER }} -o ./nupkgs
+          dotnet pack "LibOrbisPkg.Core/LibOrbisPkg.Core.csproj" -c ${{ env.CONFIGURATION }} -p:PackageVersion=${{ env.VERSION_SEMVER }} -o ./nupkgs
 
       - name: Upload nupkgs
         uses: actions/upload-artifact@v4
         with:
-          name: nupkgs-${{ env.PKG_VERSION }}
+          name: nupkgs-${{ env.VERSION_DISPLAY }}
           path: nupkgs/*.nupkg
 
   # --- Publish Release only when the ref is a tag (v*) ---
