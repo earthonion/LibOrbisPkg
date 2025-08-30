@@ -3,7 +3,7 @@ name: CI & Release
 on:
   push:
     branches: ["**"]
-    tags: ["**"] 
+    tags: ["v*"]        # tag like v0.3.0 to publish a Release
   pull_request:
 
 permissions:
@@ -211,19 +211,37 @@ jobs:
           dotnet-version: '8.0.x'
           cache: true
 
+      # Compute a valid SemVer for NuGet:
+      # - on tags like v0.3.0  -> 0.3.0
+      # - on branches (e.g., master) -> 0.0.0-master.<run>
+      - name: Compute package version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            # Trim leading v
+            PKG_VERSION="${GITHUB_REF_NAME#v}"
+          else
+            # Sanitize branch name to allowed chars for prerelease label
+            BR="${GITHUB_REF_NAME//[^0-9A-Za-z.-]/.}"
+            PKG_VERSION="0.0.0-${BR}.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "PKG_VERSION=$PKG_VERSION" >> "$GITHUB_ENV"
+          echo "pkg_version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
+
       - name: Restore
         run: dotnet restore "LibOrbisPkg.sln"
 
       - name: Pack
         run: |
           mkdir -p nupkgs
-          dotnet pack "LibOrbisPkg/LibOrbisPkg.csproj" -c ${{ env.CONFIGURATION }} -p:PackageVersion=${{ env.VERSION }} -o ./nupkgs
-          dotnet pack "LibOrbisPkg.Core/LibOrbisPkg.Core.csproj" -c ${{ env.CONFIGURATION }} -p:PackageVersion=${{ env.VERSION }} -o ./nupkgs
+          dotnet pack "LibOrbisPkg/LibOrbisPkg.csproj" -c ${{ env.CONFIGURATION }} -p:PackageVersion=${{ env.PKG_VERSION }} -o ./nupkgs
+          dotnet pack "LibOrbisPkg.Core/LibOrbisPkg.Core.csproj" -c ${{ env.CONFIGURATION }} -p:PackageVersion=${{ env.PKG_VERSION }} -o ./nupkgs
 
       - name: Upload nupkgs
         uses: actions/upload-artifact@v4
         with:
-          name: nupkgs-${{ env.VERSION }}
+          name: nupkgs-${{ env.PKG_VERSION }}
           path: nupkgs/*.nupkg
 
   # --- Publish Release only when the ref is a tag (v*) ---
