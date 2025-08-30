@@ -3,8 +3,11 @@ name: CI & Release
 on:
   push:
     branches: ["**"]
-    tags: ["v*"]          # tag like v0.3.0 to publish a Release
+    tags: ["v*"]        # tag like v0.3.0 to publish a Release
   pull_request:
+
+permissions:
+  contents: write
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -16,7 +19,7 @@ env:
   VERSION: ${{ github.ref_name }}   # "v0.3.0" on tags, branch name otherwise
 
 jobs:
-  # --- Fast cross-platform build + tests on every edit ---
+  # --- Cross-platform build & tests on every edit (Core only; avoids WinForms) ---
   test-matrix:
     name: Build & Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -27,6 +30,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
@@ -39,30 +43,32 @@ jobs:
             **/NuGet.config
             **/global.json
 
-      - name: Restore
-        run: dotnet restore "LibOrbisPkg.sln"
+      # IMPORTANT: Only build the Core solution to avoid PkgEditor (WinForms) on non-Windows
+      - name: Restore (Core solution)
+        run: dotnet restore "LibOrbisPkg.Core.sln"
 
-      - name: Build
-        run: dotnet build "LibOrbisPkg.sln" -c ${{ env.CONFIGURATION }} --no-restore
+      - name: Build (Core solution)
+        run: dotnet build "LibOrbisPkg.Core.sln" -c ${{ env.CONFIGURATION }} --no-restore
 
-      - name: Test
-        run: dotnet test "LibOrbisPkg.sln" -c ${{ env.CONFIGURATION }} --no-build --verbosity normal
+      - name: Test (Core tests)
+        run: dotnet test "LibOrbisPkgTests/LibOrbisPkgTests.csproj" -c ${{ env.CONFIGURATION }} --no-build --verbosity normal
 
-  # --- Package LibOrbisPkg.Core (framework library, once on Linux) ---
+  # --- Pack LibOrbisPkg.Core into a ZIP (once on Linux) ---
   core-pack:
-    name: Pack LibOrbisPkg.Core
+    name: Package LibOrbisPkg.Core
     runs-on: ubuntu-latest
     needs: test-matrix
 
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
           cache: true
 
       - name: Restore
-        run: dotnet restore "LibOrbisPkg.sln"
+        run: dotnet restore "LibOrbisPkg.Core/LibOrbisPkg.Core.csproj"
 
       - name: Build Core
         run: dotnet build "LibOrbisPkg.Core/LibOrbisPkg.Core.csproj" -c ${{ env.CONFIGURATION }} --no-restore
@@ -85,7 +91,7 @@ jobs:
           name: LibOrbisPkg.Core-${{ env.VERSION }}-net8.0.zip
           path: out/LibOrbisPkg.Core-${{ env.VERSION }}-net8.0.zip
 
-  # --- Package PkgTool for each RID (runs on every edit) ---
+  # --- Package PkgTool for each RID (every edit) ---
   pkgtool:
     name: PkgTool (${{ matrix.os }} | ${{ matrix.rid }})
     runs-on: ${{ matrix.os }}
@@ -110,6 +116,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
@@ -122,8 +129,9 @@ jobs:
             **/NuGet.config
             **/global.json
 
-      - name: Restore
-        run: dotnet restore "LibOrbisPkg.sln"
+      # Restore only the CLI project to avoid pulling PkgEditor on non-Windows
+      - name: Restore (PkgTool.Core)
+        run: dotnet restore "PkgTool.Core/PkgTool.Core.csproj"
 
       - name: Publish PkgTool.Core (framework-dependent)
         run: |
@@ -150,7 +158,7 @@ jobs:
           name: PkgTool-${{ env.VERSION }}-${{ matrix.rid }}.zip
           path: out/PkgTool-${{ env.VERSION }}-${{ matrix.rid }}.zip
 
-  # --- Package PkgEditor GUI (Windows-only, every edit) ---
+  # --- Windows-only build for the GUI (PkgEditor) on every edit ---
   pkgeditor:
     name: PkgEditor (Windows GUI)
     runs-on: windows-latest
@@ -158,13 +166,24 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
           cache: true
+          cache-dependency-path: |
+            **/*.sln
+            **/*.csproj
+            **/Directory.Packages.props
+            **/Directory.Build.props
+            **/NuGet.config
+            **/global.json
 
-      - name: Restore
+      - name: Restore (full solution)
         run: dotnet restore "LibOrbisPkg.sln"
+
+      - name: Build GUI (Windows only)
+        run: dotnet build "LibOrbisPkg.sln" -c ${{ env.CONFIGURATION }} --no-restore
 
       - name: Publish PkgEditor (win-x64)
         run: dotnet publish "PkgEditor/PkgEditor.csproj" -c ${{ env.CONFIGURATION }} -r win-x64 --no-self-contained -o out/pkgeditor/win-x64
@@ -186,6 +205,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
@@ -206,7 +226,7 @@ jobs:
           name: nupkgs-${{ env.VERSION }}
           path: nupkgs/*.nupkg
 
-  # --- Release only when ref is a tag (v*) ---
+  # --- Publish Release only when the ref is a tag (v*) ---
   release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
