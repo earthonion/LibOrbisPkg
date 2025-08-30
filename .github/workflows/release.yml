@@ -158,27 +158,49 @@ jobs:
           path: out/PkgEditor-${{ needs.compute-version.outputs.display }}-windows-x64.zip
 
   # --- Publish Release only for tags ---
-  release:
-    name: Publish GitHub Release
-    runs-on: ubuntu-latest
-    needs: [core-pack, pkgtool, pkgeditor]
-    if: startsWith(github.ref, 'refs/tags/v')
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-      - name: List files
-        run: find dist -type f -maxdepth 3 -print
-      - name: Create/Update Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/**/PkgTool-*.zip
-            dist/**/LibOrbisPkg.Core-*.zip
-            dist/**/PkgEditor-*.zip
-          generate_release_notes: true
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # --- Publish assets to GitHub Releases ---
+release:
+  name: Publish GitHub Release
+  runs-on: ubuntu-latest
+  needs: [core-pack, pkgtool, pkgeditor]
+
+  steps:
+    - name: Download artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: dist
+
+    - name: List files
+      run: find dist -type f -maxdepth 3 -print
+
+    # Tagged release: vX.Y.Z -> normal release
+    - name: Create/Update Tagged Release
+      if: startsWith(github.ref, 'refs/tags/v')
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          dist/**/PkgTool-*.zip
+          dist/**/LibOrbisPkg.Core-*.zip
+          dist/**/PkgEditor-*.zip
+        generate_release_notes: true
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    # Nightly prerelease on non-tags: keeps overwriting "nightly"
+    - name: Create/Update Nightly Prerelease
+      if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: nightly
+        name: Nightly build
+        body: "Automated build from `${{ github.ref_name }}` @ ${{ github.sha }}"
+        files: |
+          dist/**/PkgTool-*.zip
+          dist/**/LibOrbisPkg.Core-*.zip
+          dist/**/PkgEditor-*.zip
+        prerelease: true
+        draft: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
