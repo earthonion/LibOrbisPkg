@@ -1,0 +1,188 @@
+name: Release (matrix)
+
+on:
+  push:
+    tags:
+      - 'v*'   # e.g. v0.3.0
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_NOLOGO: true
+  CONFIGURATION: Release
+  VERSION: ${{ github.ref_name }}  # v0.x.y
+
+jobs:
+  # Build once per OS/RID for the CLI tool
+  pkgtool:
+    name: PkgTool (${{ matrix.os }} | ${{ matrix.rid }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux
+          - os: ubuntu-latest
+            rid: linux-x64
+          - os: ubuntu-latest
+            rid: linux-arm64
+          # macOS
+          - os: macos-latest
+            rid: osx-x64
+          - os: macos-latest
+            rid: osx-arm64
+          # Windows
+          - os: windows-latest
+            rid: win-x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+          cache: true
+          cache-dependency-path: |
+            **/*.sln
+            **/*.csproj
+            **/Directory.Packages.props
+            **/Directory.Build.props
+            **/NuGet.config
+            **/global.json
+
+      - name: Restore
+        run: dotnet restore "LibOrbisPkg.sln"
+
+      - name: Build (validate)
+        run: dotnet build "LibOrbisPkg.sln" -c ${{ env.CONFIGURATION }} --no-restore
+
+      - name: Publish PkgTool.Core
+        run: |
+          dotnet publish "PkgTool.Core/PkgTool.Core.csproj" \
+            -c ${{ env.CONFIGURATION }} \
+            -r ${{ matrix.rid }} \
+            --no-self-contained \
+            -o out/pkgtool/${{ matrix.rid }}
+
+      # Core library ZIP is RID-agnostic; we’ll build it once per matrix run
+      - name: Build LibOrbisPkg.Core (net8.0)
+        run: |
+          dotnet build "LibOrbisPkg.Core/LibOrbisPkg.Core.csproj" -c ${{ env.CONFIGURATION }} --no-restore
+          mkdir -p out/core/net8.0
+          cp LibOrbisPkg.Core/bin/${{ env.CONFIGURATION }}/net8.0/LibOrbisPkg.Core.dll out/core/net8.0/
+          if [ -f LibOrbisPkg.Core/bin/${{ env.CONFIGURATION }}/net8.0/LibOrbisPkg.Core.xml ]; then cp LibOrbisPkg.Core/bin/${{ env.CONFIGURATION }}/net8.0/LibOrbisPkg.Core.xml out/core/net8.0/; fi
+          if [ -f LibOrbisPkg.Core/bin/${{ env.CONFIGURATION }}/net8.0/LibOrbisPkg.Core.pdb ]; then cp LibOrbisPkg.Core/bin/${{ env.CONFIGURATION }}/net8.0/LibOrbisPkg.Core.pdb out/core/net8.0/; fi
+        shell: bash
+
+      - name: Package (non-Windows)
+        if: runner.os != 'Windows'
+        run: |
+          cd out/pkgtool/${{ matrix.rid }}
+          zip -r ../../PkgTool-${{ env.VERSION }}-${{ matrix.rid }}.zip .
+          cd ../../core
+          zip -r ../LibOrbisPkg.Core-${{ env.VERSION }}-net8.0.zip net8.0
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          powershell -NoProfile -Command "Compress-Archive -Path out/pkgtool/${{ matrix.rid }}/* -DestinationPath out/PkgTool-${{ env.VERSION }}-${{ matrix.rid }}.zip"
+          powershell -NoProfile -Command "Compress-Archive -Path out/core/net8.0/* -DestinationPath out/LibOrbisPkg.Core-${{ env.VERSION }}-net8.0.zip"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pkgtool-${{ matrix.os }}-${{ matrix.rid }}
+          path: |
+            out/PkgTool-${{ env.VERSION }}-${{ matrix.rid }}.zip
+            out/LibOrbisPkg.Core-${{ env.VERSION }}-net8.0.zip
+          if-no-files-found: error
+
+  # Windows-only GUI build (PkgEditor)
+  pkgeditor:
+    name: PkgEditor (Windows GUI)
+    runs-on: windows-latest
+    needs: pkgtool
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+          cache: true
+
+      - name: Restore
+        run: dotnet restore "LibOrbisPkg.sln"
+
+      - name: Build GUI
+        run: dotnet build "LibOrbisPkg.sln" -c ${{ env.CONFIGURATION }} --no-restore
+
+      - name: Publish PkgEditor (win-x64)
+        run: dotnet publish "PkgEditor/PkgEditor.csproj" -c ${{ env.CONFIGURATION }} -r win-x64 --no-self-contained -o out/pkgeditor/win-x64
+
+      - name: Zip GUI
+        run: powershell -NoProfile -Command "Compress-Archive -Path out/pkgeditor/win-x64/* -DestinationPath out/PkgEditor-${{ env.VERSION }}-windows-x64.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pkgeditor-win-x64
+          path: out/PkgEditor-${{ env.VERSION }}-windows-x64.zip
+
+  # Optional: pack NuGets for the library (kept as artifacts and/or push in a separate job)
+  nuget:
+    name: Pack NuGet(s)
+    runs-on: ubuntu-latest
+    needs: pkgtool
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+          cache: true
+
+      - name: Restore
+        run: dotnet restore "LibOrbisPkg.sln"
+
+      - name: Pack LibOrbisPkg (and Core)
+        run: |
+          dotnet pack "LibOrbisPkg/LibOrbisPkg.csproj" -c ${{ env.CONFIGURATION }} -p:PackageVersion=${{ env.VERSION }} -o ./nupkgs
+          dotnet pack "LibOrbisPkg.Core/LibOrbisPkg.Core.csproj" -c ${{ env.CONFIGURATION }} -p:PackageVersion=${{ env.VERSION }} -o ./nupkgs
+
+      - name: Upload nupkgs
+        uses: actions/upload-artifact@v4
+        with:
+          name: nupkgs
+          path: nupkgs/*.nupkg
+
+  # Final release publish: grabs all artifacts and attaches to the tag's release
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: [pkgtool, pkgeditor, nuget]
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: List dist
+        run: find dist -type f -maxdepth 3 -print
+
+      - name: Create/Update Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/**/PkgTool-*.zip
+            dist/**/LibOrbisPkg.Core-*.zip
+            dist/**/PkgEditor-*.zip
+            dist/**/nupkgs/*.nupkg
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
