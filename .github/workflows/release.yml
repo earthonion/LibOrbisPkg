@@ -3,7 +3,7 @@ name: CI & Release
 on:
   push:
     branches: ["**"]
-    tags: ["v*"]        # tag like v0.3.0 to publish a Release
+    tags: ["v*"]
   pull_request:
 
 permissions:
@@ -46,7 +46,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'   # cache disabled
+          dotnet-version: '8.0.x'
       - name: Restore
         run: dotnet restore "LibOrbisPkg.Core/LibOrbisPkg.Core.csproj"
       - name: Build Core
@@ -89,10 +89,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'   # cache disabled
+          dotnet-version: '8.0.x'
+
       - name: Restore (PkgTool.Core)
         run: dotnet restore "PkgTool.Core/PkgTool.Core.csproj"
-      - name: Publish PkgTool.Core
+
+      # --- Unix publish (bash; multiline with \ is OK) ---
+      - name: Publish PkgTool.Core (Unix)
+        if: runner.os != 'Windows'
         run: |
           dotnet publish "PkgTool.Core/PkgTool.Core.csproj" \
             -c ${{ env.CONFIGURATION }} \
@@ -100,15 +104,29 @@ jobs:
             --no-self-contained \
             -p:Version=${{ needs.compute-version.outputs.semver }} \
             -o out/pkgtool/${{ matrix.rid }}
+
+      # --- Windows publish (PowerShell; single line or backticks) ---
+      - name: Publish PkgTool.Core (Windows)
+        if: runner.os == 'Windows'
+        run: >
+          dotnet publish PkgTool.Core/PkgTool.Core.csproj
+          -c $env:CONFIGURATION
+          -r ${{ matrix.rid }}
+          --no-self-contained
+          -p:Version=${{ needs.compute-version.outputs.semver }}
+          -o out/pkgtool/${{ matrix.rid }}
+
       - name: Zip (Unix)
         if: runner.os != 'Windows'
         run: |
           cd out/pkgtool/${{ matrix.rid }}
           zip -r "../../../PkgTool-${{ needs.compute-version.outputs.display }}-${{ matrix.rid }}.zip" .
+
       - name: Zip (Windows)
         if: runner.os == 'Windows'
         run: |
           powershell -NoProfile -Command "Compress-Archive -Path out/pkgtool/${{ matrix.rid }}/* -DestinationPath out/PkgTool-${{ needs.compute-version.outputs.display }}-${{ matrix.rid }}.zip"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -123,7 +141,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'   # cache disabled
+          dotnet-version: '8.0.x'
       - name: Restore
         run: dotnet restore "LibOrbisPkg.sln"
       - name: Build GUI
@@ -146,13 +164,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'   # cache disabled
+          dotnet-version: '8.0.x'
       - name: Restore
         run: dotnet restore "LibOrbisPkg.sln"
       - name: Pack
         run: |
           mkdir -p nupkgs
-          dotnet pack "LibOrbisPkg/LibOrbisPkg.csproj"          -c ${{ env.CONFIGURATION }} -p:PackageVersion=${{ needs.compute-version.outputs.semver }} -o ./nupkgs
+          dotnet pack "LibOrbisPkg/LibOrbisPkg.csproj" -c ${{ env.CONFIGURATION }} -p:PackageVersion=${{ needs.compute-version.outputs.semver }} -o ./nupkgs
           dotnet pack "LibOrbisPkg.Core/LibOrbisPkg.Core.csproj" -c ${{ env.CONFIGURATION }} -p:PackageVersion=${{ needs.compute-version.outputs.semver }} -o ./nupkgs
       - name: Upload nupkgs
         uses: actions/upload-artifact@v4
