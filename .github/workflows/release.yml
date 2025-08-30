@@ -1,24 +1,95 @@
-name: Release (matrix)
+name: CI & Release
 
 on:
   push:
-    tags:
-      - 'v*'   # e.g. v0.3.0
+    branches: ["**"]
+    tags: ["v0.2.0"]          # tag like v0.3.0 to publish a Release
+  pull_request:
 
 concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   DOTNET_NOLOGO: true
   CONFIGURATION: Release
-  VERSION: ${{ github.ref_name }}  # v0.x.y
+  VERSION: ${{ github.ref_name }}   # "v0.3.0" on tags, branch name otherwise
 
 jobs:
-  # Build once per OS/RID for the CLI tool
+  # --- Fast cross-platform build + tests on every edit ---
+  test-matrix:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+          cache: true
+          cache-dependency-path: |
+            **/*.sln
+            **/*.csproj
+            **/Directory.Packages.props
+            **/Directory.Build.props
+            **/NuGet.config
+            **/global.json
+
+      - name: Restore
+        run: dotnet restore "LibOrbisPkg.sln"
+
+      - name: Build
+        run: dotnet build "LibOrbisPkg.sln" -c ${{ env.CONFIGURATION }} --no-restore
+
+      - name: Test
+        run: dotnet test "LibOrbisPkg.sln" -c ${{ env.CONFIGURATION }} --no-build --verbosity normal
+
+  # --- Package LibOrbisPkg.Core (framework library, once on Linux) ---
+  core-pack:
+    name: Pack LibOrbisPkg.Core
+    runs-on: ubuntu-latest
+    needs: test-matrix
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+          cache: true
+
+      - name: Restore
+        run: dotnet restore "LibOrbisPkg.sln"
+
+      - name: Build Core
+        run: dotnet build "LibOrbisPkg.Core/LibOrbisPkg.Core.csproj" -c ${{ env.CONFIGURATION }} --no-restore
+
+      - name: Stage Core files
+        run: |
+          mkdir -p out/core/net8.0
+          cp LibOrbisPkg.Core/bin/${{ env.CONFIGURATION }}/net8.0/LibOrbisPkg.Core.dll out/core/net8.0/
+          test -f LibOrbisPkg.Core/bin/${{ env.CONFIGURATION }}/net8.0/LibOrbisPkg.Core.xml && cp LibOrbisPkg.Core/bin/${{ env.CONFIGURATION }}/net8.0/LibOrbisPkg.Core.xml out/core/net8.0/ || true
+          test -f LibOrbisPkg.Core/bin/${{ env.CONFIGURATION }}/net8.0/LibOrbisPkg.Core.pdb && cp LibOrbisPkg.Core/bin/${{ env.CONFIGURATION }}/net8.0/LibOrbisPkg.Core.pdb out/core/net8.0/ || true
+
+      - name: Zip Core
+        run: |
+          cd out/core
+          zip -r ../LibOrbisPkg.Core-${{ env.VERSION }}-net8.0.zip net8.0
+
+      - name: Upload Core zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: LibOrbisPkg.Core-${{ env.VERSION }}-net8.0.zip
+          path: out/LibOrbisPkg.Core-${{ env.VERSION }}-net8.0.zip
+
+  # --- Package PkgTool for each RID (runs on every edit) ---
   pkgtool:
     name: PkgTool (${{ matrix.os }} | ${{ matrix.rid }})
     runs-on: ${{ matrix.os }}
+    needs: test-matrix
     strategy:
       fail-fast: false
       matrix:
@@ -39,7 +110,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
@@ -55,10 +125,7 @@ jobs:
       - name: Restore
         run: dotnet restore "LibOrbisPkg.sln"
 
-      - name: Build (validate)
-        run: dotnet build "LibOrbisPkg.sln" -c ${{ env.CONFIGURATION }} --no-restore
-
-      - name: Publish PkgTool.Core
+      - name: Publish PkgTool.Core (framework-dependent)
         run: |
           dotnet publish "PkgTool.Core/PkgTool.Core.csproj" \
             -c ${{ env.CONFIGURATION }} \
@@ -66,48 +133,31 @@ jobs:
             --no-self-contained \
             -o out/pkgtool/${{ matrix.rid }}
 
-      # Core library ZIP is RID-agnostic; we’ll build it once per matrix run
-      - name: Build LibOrbisPkg.Core (net8.0)
-        run: |
-          dotnet build "LibOrbisPkg.Core/LibOrbisPkg.Core.csproj" -c ${{ env.CONFIGURATION }} --no-restore
-          mkdir -p out/core/net8.0
-          cp LibOrbisPkg.Core/bin/${{ env.CONFIGURATION }}/net8.0/LibOrbisPkg.Core.dll out/core/net8.0/
-          if [ -f LibOrbisPkg.Core/bin/${{ env.CONFIGURATION }}/net8.0/LibOrbisPkg.Core.xml ]; then cp LibOrbisPkg.Core/bin/${{ env.CONFIGURATION }}/net8.0/LibOrbisPkg.Core.xml out/core/net8.0/; fi
-          if [ -f LibOrbisPkg.Core/bin/${{ env.CONFIGURATION }}/net8.0/LibOrbisPkg.Core.pdb ]; then cp LibOrbisPkg.Core/bin/${{ env.CONFIGURATION }}/net8.0/LibOrbisPkg.Core.pdb out/core/net8.0/; fi
-        shell: bash
-
-      - name: Package (non-Windows)
+      - name: Zip (Unix)
         if: runner.os != 'Windows'
         run: |
           cd out/pkgtool/${{ matrix.rid }}
-          zip -r ../../PkgTool-${{ env.VERSION }}-${{ matrix.rid }}.zip .
-          cd ../../core
-          zip -r ../LibOrbisPkg.Core-${{ env.VERSION }}-net8.0.zip net8.0
+          zip -r "../../../PkgTool-${{ env.VERSION }}-${{ matrix.rid }}.zip" .
 
-      - name: Package (Windows)
+      - name: Zip (Windows)
         if: runner.os == 'Windows'
         run: |
           powershell -NoProfile -Command "Compress-Archive -Path out/pkgtool/${{ matrix.rid }}/* -DestinationPath out/PkgTool-${{ env.VERSION }}-${{ matrix.rid }}.zip"
-          powershell -NoProfile -Command "Compress-Archive -Path out/core/net8.0/* -DestinationPath out/LibOrbisPkg.Core-${{ env.VERSION }}-net8.0.zip"
 
-      - name: Upload artifacts
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pkgtool-${{ matrix.os }}-${{ matrix.rid }}
-          path: |
-            out/PkgTool-${{ env.VERSION }}-${{ matrix.rid }}.zip
-            out/LibOrbisPkg.Core-${{ env.VERSION }}-net8.0.zip
-          if-no-files-found: error
+          name: PkgTool-${{ env.VERSION }}-${{ matrix.rid }}.zip
+          path: out/PkgTool-${{ env.VERSION }}-${{ matrix.rid }}.zip
 
-  # Windows-only GUI build (PkgEditor)
+  # --- Package PkgEditor GUI (Windows-only, every edit) ---
   pkgeditor:
     name: PkgEditor (Windows GUI)
     runs-on: windows-latest
-    needs: pkgtool
+    needs: test-matrix
 
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
@@ -115,9 +165,6 @@ jobs:
 
       - name: Restore
         run: dotnet restore "LibOrbisPkg.sln"
-
-      - name: Build GUI
-        run: dotnet build "LibOrbisPkg.sln" -c ${{ env.CONFIGURATION }} --no-restore
 
       - name: Publish PkgEditor (win-x64)
         run: dotnet publish "PkgEditor/PkgEditor.csproj" -c ${{ env.CONFIGURATION }} -r win-x64 --no-self-contained -o out/pkgeditor/win-x64
@@ -128,14 +175,14 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pkgeditor-win-x64
+          name: PkgEditor-${{ env.VERSION }}-windows-x64.zip
           path: out/PkgEditor-${{ env.VERSION }}-windows-x64.zip
 
-  # Optional: pack NuGets for the library (kept as artifacts and/or push in a separate job)
+  # --- Optional: pack NuGets on every edit (attached to Release only on tag) ---
   nuget:
     name: Pack NuGet(s)
     runs-on: ubuntu-latest
-    needs: pkgtool
+    needs: test-matrix
 
     steps:
       - uses: actions/checkout@v4
@@ -147,22 +194,24 @@ jobs:
       - name: Restore
         run: dotnet restore "LibOrbisPkg.sln"
 
-      - name: Pack LibOrbisPkg (and Core)
+      - name: Pack
         run: |
+          mkdir -p nupkgs
           dotnet pack "LibOrbisPkg/LibOrbisPkg.csproj" -c ${{ env.CONFIGURATION }} -p:PackageVersion=${{ env.VERSION }} -o ./nupkgs
           dotnet pack "LibOrbisPkg.Core/LibOrbisPkg.Core.csproj" -c ${{ env.CONFIGURATION }} -p:PackageVersion=${{ env.VERSION }} -o ./nupkgs
 
       - name: Upload nupkgs
         uses: actions/upload-artifact@v4
         with:
-          name: nupkgs
+          name: nupkgs-${{ env.VERSION }}
           path: nupkgs/*.nupkg
 
-  # Final release publish: grabs all artifacts and attaches to the tag's release
+  # --- Release only when ref is a tag (v*) ---
   release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    needs: [pkgtool, pkgeditor, nuget]
+    needs: [core-pack, pkgtool, pkgeditor, nuget]
+    if: startsWith(github.ref, 'refs/tags/v')
 
     steps:
       - name: Download artifacts
@@ -170,7 +219,7 @@ jobs:
         with:
           path: dist
 
-      - name: List dist
+      - name: List files
         run: find dist -type f -maxdepth 3 -print
 
       - name: Create/Update Release
