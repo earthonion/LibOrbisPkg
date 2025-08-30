@@ -3,7 +3,7 @@ name: CI & Release
 on:
   push:
     branches: ["**"]
-    tags: ["v*"]        # tag like v0.3.0 to publish a Release
+    tags: ["**"] 
   pull_request:
 
 permissions:
