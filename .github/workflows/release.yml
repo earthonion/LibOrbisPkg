@@ -38,6 +38,7 @@ jobs:
           echo "display=$DISPLAY" >> $GITHUB_OUTPUT
           echo "semver=$SEMVER"  >> $GITHUB_OUTPUT
 
+  # --- Package LibOrbisPkg.Core (never touches full .sln) ---
   core-pack:
     name: Package LibOrbisPkg.Core
     runs-on: ubuntu-latest
@@ -47,7 +48,7 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
-      - name: Restore
+      - name: Restore (LibOrbisPkg.Core.csproj)
         run: dotnet restore "LibOrbisPkg.Core/LibOrbisPkg.Core.csproj"
       - name: Build Core
         run: dotnet build "LibOrbisPkg.Core/LibOrbisPkg.Core.csproj" -c ${{ env.CONFIGURATION }} --no-restore -p:Version=${{ needs.compute-version.outputs.semver }}
@@ -67,6 +68,7 @@ jobs:
           name: LibOrbisPkg.Core-${{ needs.compute-version.outputs.display }}-net8.0.zip
           path: out/LibOrbisPkg.Core-${{ needs.compute-version.outputs.display }}-net8.0.zip
 
+  # --- Package PkgTool per-RID (never touches full .sln) ---
   pkgtool:
     name: PkgTool (${{ matrix.os }} | ${{ matrix.rid }})
     runs-on: ${{ matrix.os }}
@@ -75,15 +77,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-latest   # Linux
             rid: linux-x64
           - os: ubuntu-latest
             rid: linux-arm64
-          - os: macos-latest
+          - os: macos-latest    # macOS
             rid: osx-x64
           - os: macos-latest
             rid: osx-arm64
-          - os: windows-latest
+          - os: windows-latest  # Windows
             rid: win-x64
     steps:
       - uses: actions/checkout@v4
@@ -91,10 +93,9 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Restore (PkgTool.Core)
+      - name: Restore (PkgTool.Core.csproj)
         run: dotnet restore "PkgTool.Core/PkgTool.Core.csproj"
 
-      # --- Unix publish (bash; multiline with \ is OK) ---
       - name: Publish PkgTool.Core (Unix)
         if: runner.os != 'Windows'
         run: |
@@ -105,7 +106,6 @@ jobs:
             -p:Version=${{ needs.compute-version.outputs.semver }} \
             -o out/pkgtool/${{ matrix.rid }}
 
-      # --- Windows publish (PowerShell; single line or backticks) ---
       - name: Publish PkgTool.Core (Windows)
         if: runner.os == 'Windows'
         run: >
@@ -133,6 +133,7 @@ jobs:
           name: PkgTool-${{ needs.compute-version.outputs.display }}-${{ matrix.rid }}.zip
           path: out/PkgTool-${{ needs.compute-version.outputs.display }}-${{ matrix.rid }}.zip
 
+  # --- Windows-only: full solution (PkgEditor & anything Windows-targeted) ---
   pkgeditor:
     name: PkgEditor (Windows GUI)
     runs-on: windows-latest
@@ -142,7 +143,7 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
-      - name: Restore
+      - name: Restore (full solution)
         run: dotnet restore "LibOrbisPkg.sln"
       - name: Build GUI
         run: dotnet build "LibOrbisPkg.sln" -c ${{ env.CONFIGURATION }} --no-restore -p:Version=${{ needs.compute-version.outputs.semver }}
@@ -156,32 +157,11 @@ jobs:
           name: PkgEditor-${{ needs.compute-version.outputs.display }}-windows-x64.zip
           path: out/PkgEditor-${{ needs.compute-version.outputs.display }}-windows-x64.zip
 
-  nuget:
-    name: Pack NuGet(s)
-    runs-on: ubuntu-latest
-    needs: compute-version
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
-      - name: Restore
-        run: dotnet restore "LibOrbisPkg.sln"
-      - name: Pack
-        run: |
-          mkdir -p nupkgs
-          dotnet pack "LibOrbisPkg/LibOrbisPkg.csproj" -c ${{ env.CONFIGURATION }} -p:PackageVersion=${{ needs.compute-version.outputs.semver }} -o ./nupkgs
-          dotnet pack "LibOrbisPkg.Core/LibOrbisPkg.Core.csproj" -c ${{ env.CONFIGURATION }} -p:PackageVersion=${{ needs.compute-version.outputs.semver }} -o ./nupkgs
-      - name: Upload nupkgs
-        uses: actions/upload-artifact@v4
-        with:
-          name: nupkgs-${{ needs.compute-version.outputs.display }}
-          path: nupkgs/*.nupkg
-
+  # --- Publish Release only for tags ---
   release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    needs: [core-pack, pkgtool, pkgeditor, nuget]
+    needs: [core-pack, pkgtool, pkgeditor]
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - name: Download artifacts
@@ -197,7 +177,6 @@ jobs:
             dist/**/PkgTool-*.zip
             dist/**/LibOrbisPkg.Core-*.zip
             dist/**/PkgEditor-*.zip
-            dist/**/nupkgs/*.nupkg
           generate_release_notes: true
           draft: false
           prerelease: false
