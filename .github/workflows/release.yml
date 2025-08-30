@@ -16,42 +16,20 @@ concurrency:
 env:
   DOTNET_NOLOGO: true
   CONFIGURATION: Release
-  # DO NOT set VERSION globally to avoid NuGet using an invalid value during restore
 
-# Reusable step snippet (copy into each job before any dotnet command):
-# - name: Compute versions
-#   id: ver
-#   shell: bash
-#   run: |
-#     if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-#       DISPLAY="${GITHUB_REF_NAME}"           # e.g., v0.3.0
-#       SEMVER="${GITHUB_REF_NAME#v}"          # e.g., 0.3.0
-#     else
-#       BR="${GITHUB_REF_NAME//[^0-9A-Za-z.-]/.}"
-#       DISPLAY="${BR}"                        # e.g., master
-#       SEMVER="0.0.0-${BR}.${GITHUB_RUN_NUMBER}"  # e.g., 0.0.0-master.1234
-#     fi
-#     echo "VERSION_DISPLAY=$DISPLAY" >> "$GITHUB_ENV"
-#     echo "VERSION_SEMVER=$SEMVER"  >> "$GITHUB_ENV"
-#     # Ensure any inherited VERSION is cleared so NuGet/MSBuild won't choke:
-#     echo "VERSION="                 >> "$GITHUB_ENV"
-
+# Helper step: compute versions
+# VERSION_DISPLAY = v0.3.0 (tag) or branch name (master)
+# VERSION_SEMVER  = 0.3.0 (tag) or 0.0.0-master.<run> (branch build)
+# VERSION is cleared so NuGet/MSBuild never sees "master"
 jobs:
-  # --- Cross-platform build & tests on every edit (Core only; avoids WinForms) ---
-  test-matrix:
-    name: Build & Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-
+  compute-version:
+    runs-on: ubuntu-latest
+    outputs:
+      display: ${{ steps.ver.outputs.display }}
+      semver:  ${{ steps.ver.outputs.semver }}
     steps:
-      - uses: actions/checkout@v4
-
       - name: Compute versions
         id: ver
-        shell: bash
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             DISPLAY="${GITHUB_REF_NAME}"
@@ -61,57 +39,17 @@ jobs:
             DISPLAY="${BR}"
             SEMVER="0.0.0-${BR}.${GITHUB_RUN_NUMBER}"
           fi
-          echo "VERSION_DISPLAY=$DISPLAY" >> "$GITHUB_ENV"
-          echo "VERSION_SEMVER=$SEMVER"  >> "$GITHUB_ENV"
-          echo "VERSION="                 >> "$GITHUB_ENV"
+          echo "display=$DISPLAY" >> $GITHUB_OUTPUT
+          echo "semver=$SEMVER"  >> $GITHUB_OUTPUT
 
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
-          cache: true
-          cache-dependency-path: |
-            **/*.sln
-            **/*.csproj
-            **/Directory.Packages.props
-            **/Directory.Build.props
-            **/NuGet.config
-            **/global.json
-
-      # IMPORTANT: Only build the Core solution to avoid PkgEditor (WinForms) on non-Windows
-      - name: Restore (Core solution)
-        run: dotnet restore "LibOrbisPkg.Core.sln"
-
-      - name: Build (Core solution)
-        run: dotnet build "LibOrbisPkg.Core.sln" -c ${{ env.CONFIGURATION }} --no-restore -p:Version=${{ env.VERSION_SEMVER }}
-
-      - name: Test (Core tests)
-        run: dotnet test "LibOrbisPkgTests/LibOrbisPkgTests.csproj" -c ${{ env.CONFIGURATION }} --no-build --verbosity normal
-
-  # --- Pack LibOrbisPkg.Core into a ZIP (once on Linux) ---
+  # --- Build & package LibOrbisPkg.Core ---
   core-pack:
     name: Package LibOrbisPkg.Core
     runs-on: ubuntu-latest
-    needs: test-matrix
+    needs: compute-version
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Compute versions
-        id: ver
-        shell: bash
-        run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            DISPLAY="${GITHUB_REF_NAME}"
-            SEMVER="${GITHUB_REF_NAME#v}"
-          else
-            BR="${GITHUB_REF_NAME//[^0-9A-Za-z.-]/.}"
-            DISPLAY="${BR}"
-            SEMVER="0.0.0-${BR}.${GITHUB_RUN_NUMBER}"
-          fi
-          echo "VERSION_DISPLAY=$DISPLAY" >> "$GITHUB_ENV"
-          echo "VERSION_SEMVER=$SEMVER"  >> "$GITHUB_ENV"
-          echo "VERSION="                 >> "$GITHUB_ENV"
-
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
@@ -121,7 +59,7 @@ jobs:
         run: dotnet restore "LibOrbisPkg.Core/LibOrbisPkg.Core.csproj"
 
       - name: Build Core
-        run: dotnet build "LibOrbisPkg.Core/LibOrbisPkg.Core.csproj" -c ${{ env.CONFIGURATION }} --no-restore -p:Version=${{ env.VERSION_SEMVER }}
+        run: dotnet build "LibOrbisPkg.Core/LibOrbisPkg.Core.csproj" -c ${{ env.CONFIGURATION }} --no-restore -p:Version=${{ needs.compute-version.outputs.semver }}
 
       - name: Stage Core files
         run: |
@@ -133,177 +71,109 @@ jobs:
       - name: Zip Core
         run: |
           cd out/core
-          zip -r ../LibOrbisPkg.Core-${{ env.VERSION_DISPLAY }}-net8.0.zip net8.0
+          zip -r ../LibOrbisPkg.Core-${{ needs.compute-version.outputs.display }}-net8.0.zip net8.0
 
       - name: Upload Core zip
         uses: actions/upload-artifact@v4
         with:
-          name: LibOrbisPkg.Core-${{ env.VERSION_DISPLAY }}-net8.0.zip
-          path: out/LibOrbisPkg.Core-${{ env.VERSION_DISPLAY }}-net8.0.zip
+          name: LibOrbisPkg.Core-${{ needs.compute-version.outputs.display }}-net8.0.zip
+          path: out/LibOrbisPkg.Core-${{ needs.compute-version.outputs.display }}-net8.0.zip
 
-  # --- Package PkgTool for each RID (every edit) ---
+  # --- Package PkgTool for each RID ---
   pkgtool:
     name: PkgTool (${{ matrix.os }} | ${{ matrix.rid }})
     runs-on: ${{ matrix.os }}
-    needs: test-matrix
+    needs: compute-version
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Linux
           - os: ubuntu-latest
             rid: linux-x64
           - os: ubuntu-latest
             rid: linux-arm64
-          # macOS
           - os: macos-latest
             rid: osx-x64
           - os: macos-latest
             rid: osx-arm64
-          # Windows
           - os: windows-latest
             rid: win-x64
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Compute versions
-        id: ver
-        shell: bash
-        run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            DISPLAY="${GITHUB_REF_NAME}"
-            SEMVER="${GITHUB_REF_NAME#v}"
-          else
-            BR="${GITHUB_REF_NAME//[^0-9A-Za-z.-]/.}"
-            DISPLAY="${BR}"
-            SEMVER="0.0.0-${BR}.${GITHUB_RUN_NUMBER}"
-          fi
-          echo "VERSION_DISPLAY=$DISPLAY" >> "$GITHUB_ENV"
-          echo "VERSION_SEMVER=$SEMVER"  >> "$GITHUB_ENV"
-          echo "VERSION="                 >> "$GITHUB_ENV"
-
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
           cache: true
-          cache-dependency-path: |
-            **/*.sln
-            **/*.csproj
-            **/Directory.Packages.props
-            **/Directory.Build.props
-            **/NuGet.config
-            **/global.json
 
       - name: Restore (PkgTool.Core)
         run: dotnet restore "PkgTool.Core/PkgTool.Core.csproj"
 
-      - name: Publish PkgTool.Core (framework-dependent)
+      - name: Publish PkgTool.Core
         run: |
           dotnet publish "PkgTool.Core/PkgTool.Core.csproj" \
             -c ${{ env.CONFIGURATION }} \
             -r ${{ matrix.rid }} \
             --no-self-contained \
-            -p:Version=${{ env.VERSION_SEMVER }} \
+            -p:Version=${{ needs.compute-version.outputs.semver }} \
             -o out/pkgtool/${{ matrix.rid }}
 
       - name: Zip (Unix)
         if: runner.os != 'Windows'
         run: |
           cd out/pkgtool/${{ matrix.rid }}
-          zip -r "../../../PkgTool-${{ env.VERSION_DISPLAY }}-${{ matrix.rid }}.zip" .
+          zip -r "../../../PkgTool-${{ needs.compute-version.outputs.display }}-${{ matrix.rid }}.zip" .
 
       - name: Zip (Windows)
         if: runner.os == 'Windows'
         run: |
-          powershell -NoProfile -Command "Compress-Archive -Path out/pkgtool/${{ matrix.rid }}/* -DestinationPath out/PkgTool-${{ env.VERSION_DISPLAY }}-${{ matrix.rid }}.zip"
+          powershell -NoProfile -Command "Compress-Archive -Path out/pkgtool/${{ matrix.rid }}/* -DestinationPath out/PkgTool-${{ needs.compute-version.outputs.display }}-${{ matrix.rid }}.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PkgTool-${{ env.VERSION_DISPLAY }}-${{ matrix.rid }}.zip
-          path: out/PkgTool-${{ env.VERSION_DISPLAY }}-${{ matrix.rid }}.zip
+          name: PkgTool-${{ needs.compute-version.outputs.display }}-${{ matrix.rid }}.zip
+          path: out/PkgTool-${{ needs.compute-version.outputs.display }}-${{ matrix.rid }}.zip
 
-  # --- Windows-only build for the GUI (PkgEditor) on every edit ---
+  # --- Windows-only PkgEditor GUI ---
   pkgeditor:
     name: PkgEditor (Windows GUI)
     runs-on: windows-latest
-    needs: test-matrix
+    needs: compute-version
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Compute versions
-        id: ver
-        shell: bash
-        run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            DISPLAY="${GITHUB_REF_NAME}"
-            SEMVER="${GITHUB_REF_NAME#v}"
-          else
-            BR="${GITHUB_REF_NAME//[^0-9A-Za-z.-]/.}"
-            DISPLAY="${BR}"
-            SEMVER="0.0.0-${BR}.${GITHUB_RUN_NUMBER}"
-          fi
-          echo "VERSION_DISPLAY=$DISPLAY" >> "$GITHUB_ENV"
-          echo "VERSION_SEMVER=$SEMVER"  >> "$GITHUB_ENV"
-          echo "VERSION="                 >> "$GITHUB_ENV"
-
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
           cache: true
-          cache-dependency-path: |
-            **/*.sln
-            **/*.csproj
-            **/Directory.Packages.props
-            **/Directory.Build.props
-            **/NuGet.config
-            **/global.json
 
-      - name: Restore (full solution)
+      - name: Restore
         run: dotnet restore "LibOrbisPkg.sln"
 
-      - name: Build GUI (Windows only)
-        run: dotnet build "LibOrbisPkg.sln" -c ${{ env.CONFIGURATION }} --no-restore -p:Version=${{ env.VERSION_SEMVER }}
+      - name: Build GUI
+        run: dotnet build "LibOrbisPkg.sln" -c ${{ env.CONFIGURATION }} --no-restore -p:Version=${{ needs.compute-version.outputs.semver }}
 
       - name: Publish PkgEditor (win-x64)
-        run: dotnet publish "PkgEditor/PkgEditor.csproj" -c ${{ env.CONFIGURATION }} -r win-x64 --no-self-contained -p:Version=${{ env.VERSION_SEMVER }} -o out/pkgeditor/win-x64
+        run: dotnet publish "PkgEditor/PkgEditor.csproj" -c ${{ env.CONFIGURATION }} -r win-x64 --no-self-contained -p:Version=${{ needs.compute-version.outputs.semver }} -o out/pkgeditor/win-x64
 
       - name: Zip GUI
-        run: powershell -NoProfile -Command "Compress-Archive -Path out/pkgeditor/win-x64/* -DestinationPath out/PkgEditor-${{ env.VERSION_DISPLAY }}-windows-x64.zip"
+        run: powershell -NoProfile -Command "Compress-Archive -Path out/pkgeditor/win-x64/* -DestinationPath out/PkgEditor-${{ needs.compute-version.outputs.display }}-windows-x64.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PkgEditor-${{ env.VERSION_DISPLAY }}-windows-x64.zip
-          path: out/PkgEditor-${{ env.VERSION_DISPLAY }}-windows-x64.zip
+          name: PkgEditor-${{ needs.compute-version.outputs.display }}-windows-x64.zip
+          path: out/PkgEditor-${{ needs.compute-version.outputs.display }}-windows-x64.zip
 
-  # --- Optional: pack NuGets on every edit (attached to Release only on tag) ---
+  # --- Pack NuGets (optional) ---
   nuget:
     name: Pack NuGet(s)
     runs-on: ubuntu-latest
-    needs: test-matrix
+    needs: compute-version
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Compute versions
-        id: ver
-        shell: bash
-        run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            DISPLAY="${GITHUB_REF_NAME}"
-            SEMVER="${GITHUB_REF_NAME#v}"
-          else
-            BR="${GITHUB_REF_NAME//[^0-9A-Za-z.-]/.}"
-            DISPLAY="${BR}"
-            SEMVER="0.0.0-${BR}.${GITHUB_RUN_NUMBER}"
-          fi
-          echo "VERSION_DISPLAY=$DISPLAY" >> "$GITHUB_ENV"
-          echo "VERSION_SEMVER=$SEMVER"  >> "$GITHUB_ENV"
-          echo "VERSION="                 >> "$GITHUB_ENV"
-
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
@@ -315,16 +185,16 @@ jobs:
       - name: Pack
         run: |
           mkdir -p nupkgs
-          dotnet pack "LibOrbisPkg/LibOrbisPkg.csproj"     -c ${{ env.CONFIGURATION }} -p:PackageVersion=${{ env.VERSION_SEMVER }} -o ./nupkgs
-          dotnet pack "LibOrbisPkg.Core/LibOrbisPkg.Core.csproj" -c ${{ env.CONFIGURATION }} -p:PackageVersion=${{ env.VERSION_SEMVER }} -o ./nupkgs
+          dotnet pack "LibOrbisPkg/LibOrbisPkg.csproj"     -c ${{ env.CONFIGURATION }} -p:PackageVersion=${{ needs.compute-version.outputs.semver }} -o ./nupkgs
+          dotnet pack "LibOrbisPkg.Core/LibOrbisPkg.Core.csproj" -c ${{ env.CONFIGURATION }} -p:PackageVersion=${{ needs.compute-version.outputs.semver }} -o ./nupkgs
 
       - name: Upload nupkgs
         uses: actions/upload-artifact@v4
         with:
-          name: nupkgs-${{ env.VERSION_DISPLAY }}
+          name: nupkgs-${{ needs.compute-version.outputs.display }}
           path: nupkgs/*.nupkg
 
-  # --- Publish Release only when the ref is a tag (v*) ---
+  # --- Release only on tags ---
   release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
